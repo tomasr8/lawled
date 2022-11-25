@@ -286,6 +286,8 @@ uint8_t bitmaps[][6] = {
 
 static_assert(std::size(characters) == std::size(bitmaps));
 const int N_CHARACTERS = std::size(characters);
+const int CHARACTER_WIDTH = 6;
+const int CHARACTER_HEIGHT = 8;
 
 
 
