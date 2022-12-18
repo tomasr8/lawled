@@ -51,6 +51,10 @@ int drawText(const wchar_t *text, int row, int skipRows, SH1106Wire &display) {
   return x == 0 ? y : (y + 1);
 }
 
+int getLineCount(const wchar_t *text) {
+  return std::ceil(lawled::wstrlen(text) / 21.0);
+}
+
 template <size_t rows, size_t cols>
 void drawImage(const uint8_t (&image)[rows][cols], int x, int y, SH1106Wire &display) {
   for (size_t i = 0; i < rows; i++) {
@@ -72,6 +76,25 @@ wchar_t current_term[50] = {0};
 wchar_t current_definition[700] = {0};
 // Max joke length is 146 w/o the null byte.
 wchar_t joke[150] = {0};
+// last interaction
+unsigned long lastUserActionTime = 0;
+unsigned long lastAutomaticChangeTime = 0;
+
+int getTermLineCount(int currentTerm) {
+  const int n = indices[currentTerm];
+  lawled::read_wstring_from_flash(terms, n, current_term);
+  return getLineCount(current_term);
+}
+
+int getDefinitionLineCount(int currentTerm) {
+  const int n = indices[currentTerm];
+  lawled::read_wstring_from_flash(definitions, n, current_definition);
+  return getLineCount(current_definition);
+}
+
+int getTotalLineCount(int currentTerm) {
+  return 1 + getTermLineCount(currentTerm) + getDefinitionLineCount(currentTerm);
+}
 
 void drawInitialScreen(SH1106Wire &display) {
   display.clear();
@@ -94,7 +117,45 @@ void drawLoadingScreen(SH1106Wire &display) {
   }
 }
 
+int drawTerm(int currentTerm, int skipRows, SH1106Wire &display) {
+  int lines = 0;
+  display.clear();
+  const int n = indices[currentTerm];
+  lawled::read_wstring_from_flash(terms, n, current_term);
+  drawText(current_term, 0, 0, display);
+  lines += getLineCount(current_term);
+  lawled::drawHorizontalLine(lines*8 + 2, display);
+  lawled::drawHorizontalLine(lines*8 + 3, display);
+  lines++;
+  lawled::read_wstring_from_flash(definitions, n, current_definition);
+  const int emptySpace = (lines-1)*8 + 4;
+  const int maxScrollHeight = HEIGHT - emptySpace;
+  drawText(current_definition, lines, skipRows, display);
+  lines += getLineCount(current_definition);
+
+  if(lines <= 8) {
+    display.display();
+    return lines;
+  }
+
+  const int avail = 8 - (1 + getLineCount(current_term));
+  const int steps = getLineCount(current_definition) - avail;
+
+  int scrollSize = maxScrollHeight / (steps+0.5);
+  int step = (maxScrollHeight - scrollSize)/(steps);
+
+  lawled::drawVerticalScroll(scrollSize, skipRows*step + emptySpace, display);
+  display.display();
+  return lines;
+}
+
+
+#define LEFT_BTN 14
+#define RIGHT_BTN 12
+
 void setup() {
+  pinMode(LEFT_BTN, INPUT_PULLUP);
+  pinMode(RIGHT_BTN, INPUT_PULLUP);
   Serial.begin(9600);
 
   randomSeed(analogRead(15));
@@ -111,49 +172,77 @@ void setup() {
   drawLoadingScreen(display);
   delay(1000);
   display.clear();
+
+  lastAutomaticChangeTime = millis();
 }
 
+int currentTerm = 0;
+int currentScroll = 0;
+
 void loop() {
-  while(true) {
-    for(int i = 0; i < N_TERMS; i++) {
-      int lines = 0;
-      display.clear();
-      const int n = indices[i];
-      lawled::read_wstring_from_flash(terms, n, current_term);
-      lines += drawText(current_term, 0, 0, display);
-      lawled::drawHorizontalLine(lines*8 + 2, display);
-      lawled::drawHorizontalLine(lines*8 + 3, display);
-      lines++;
-      lawled::read_wstring_from_flash(definitions, n, current_definition);
-      const int emptySpace = (lines-1)*8 + 4;
-      const int maxScrollHeight = HEIGHT - emptySpace;
-      lines += drawText(current_definition, lines, 0, display);
-      int scrollSize = maxScrollHeight * (8.0/lines);
-      if(scrollSize >= maxScrollHeight) {
-        scrollSize = 0;
+  int leftBtn = digitalRead(LEFT_BTN);
+  int rightBtn = digitalRead(RIGHT_BTN);
+
+  if(leftBtn == LOW || rightBtn == LOW) {
+    if((millis() - lastUserActionTime) < 50) {
+      lastUserActionTime = millis();
+      return;
+    }
+    lastUserActionTime = millis();
+  }
+
+  const bool manual = (lastUserActionTime != 0 && (millis() - lastUserActionTime) < 3e4);
+
+  // Serial.print("Left: "); Serial.print(leftBtn); Serial.print(" Right: "); Serial.println(rightBtn);
+  // Serial.print("Last interaction: "); Serial.println(lastUserActionTime);
+  // Serial.print("Manual: "); Serial.println(manual);
+
+  if(manual) {
+    // handle stuff
+    if(leftBtn == LOW && rightBtn == LOW) {
+      // noop
+    } else if(leftBtn == LOW) {
+      if(currentScroll == 0) {
+        currentTerm = max(0, currentTerm - 1);
+      } else {
+        currentScroll = max(0, currentScroll - 1);
       }
-      int step = (maxScrollHeight - scrollSize)/(lines-10);
 
-      lawled::drawVerticalScroll(scrollSize, emptySpace, display);
-      display.display();
-      delay(1000);
-
-      if(scrollSize != 0) {
-        for(int k = 0; k < (lines-10); k++) {
-          display.clear();
-          int lns = drawText(current_term, 0, 0, display);
-          lawled::drawHorizontalLine(lns*8 + 2, display);
-          lawled::drawHorizontalLine(lns*8 + 3, display);
-          lns++;
-          drawText(current_definition, lns, k+1, display);
-          lawled::drawVerticalScroll(scrollSize, (k+1)*step + emptySpace, display);
-          display.display();
-          delay(1000);
+      drawTerm(currentTerm, currentScroll, display);
+    } else if(rightBtn == LOW) {
+      const int termCount = getTermLineCount(currentTerm);
+      const int defCount = getDefinitionLineCount(currentTerm);
+      if((1 + termCount + defCount) <= 8) {
+        currentTerm = min(N_TERMS - 1, currentTerm + 1);
+        currentScroll = 0;
+      } else {
+        const int avail = 8 - (1 + termCount);
+        const int maxSkip = defCount - avail;
+        if(currentScroll == maxSkip) {
+          currentTerm = min(N_TERMS - 1, currentTerm + 1);
+          currentScroll = 0;
+        } else {
+          currentScroll++;
         }
       }
+
+      drawTerm(currentTerm, currentScroll, display);
     }
-    lawled::fisher_yates_shuffle(indices, N_TERMS);
+  } else {
+    currentScroll = 0;
+    drawTerm(currentTerm, 0, display);
+    if((millis() - lastAutomaticChangeTime) > 4000) {
+      currentTerm++; 
+      lastAutomaticChangeTime = millis();
+    }
+
+    if(currentTerm >= N_TERMS) {
+      lawled::fisher_yates_shuffle(indices, N_TERMS);
+      currentTerm = 0;
+    }
   }
+
+  delay(50);
 }
 
 
